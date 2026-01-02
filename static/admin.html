@@ -16,6 +16,17 @@
         .btn-red { background: var(--red); }
         .hidden { display: none; }
         select { background: #48484a; color: white; border: 1px solid #555; padding: 10px; border-radius: 8px; outline: none; }
+        
+        #url-text { 
+            color: #007aff; 
+            font-size: 28px; 
+            margin: 10px 0; 
+            font-family: monospace; 
+            background: rgba(0, 122, 255, 0.1);
+            padding: 10px;
+            border-radius: 10px;
+            display: inline-block;
+        }
     </style>
 </head>
 <body>
@@ -30,8 +41,12 @@
             <button class="btn btn-green" onclick="startTest()">ПОЧАТИ ТЕСТ ТА ПОКАЗАТИ QR</button>
         </div>
 
-        <div id="qr-display" style="display:none;">
-            <img src="/static/qr_code.png" style="width:320px; border:16px solid white; border-radius:10px; margin:15px;">
+        <div id="qr-display" style="display:none; border: 2px solid #444; padding: 20px; border-radius: 20px; margin-bottom: 20px;">
+            <img id="qr-img" src="" style="width:320px; border:16px solid white; border-radius:10px; margin:15px;">
+            <div style="margin-top: 10px;">
+                <p style="color: #8e8e93; margin-bottom: 5px;">Адреса для підключення:</p>
+                <div id="url-text">Завантаження...</div>
+            </div>
         </div>
 
         <div id="monitor" style="display:none;">
@@ -64,14 +79,24 @@
             const selectedFile = document.getElementById('test-file-select').value;
             await fetch(`/api/restart?test_file=${selectedFile}`, { method: 'POST' });
             
-            const data = await (await fetch('/api/questions')).json();
-            totalQ = data.questions.length;
-            minPassScore = data.min_pass_score;
+            const qrRes = await fetch('/api/get_qr');
+            const qrData = await qrRes.json();
+            
+            const qData = await (await fetch('/api/questions')).json();
+            totalQ = qData.questions.length;
+            minPassScore = qData.min_pass_score;
             
             document.getElementById('setup-area').style.display = 'none';
+            
+            document.getElementById('qr-img').src = 'data:image/png;base64,' + qrData.qr_base64;
+            document.getElementById('url-text').innerText = qrData.url;
+            
             document.getElementById('qr-display').style.display = 'block';
             document.getElementById('monitor').style.display = 'block';
-            setInterval(refresh, 3000); refresh();
+            
+            // Збільшено інтервал до 5000мс для зменшення навантаження
+            setInterval(refresh, 5000); 
+            refresh();
         }
 
         async function resetTest() {
