@@ -1,4 +1,4 @@
-import qrcode, socket, sqlite3, json, os, random, threading, webbrowser, csv
+import qrcode, socket, sqlite3, json, os, random, threading, webbrowser, base64, io
 from datetime import datetime
 from fastapi import FastAPI, Request, Query
 from fastapi.staticfiles import StaticFiles
@@ -7,14 +7,61 @@ from pydantic import BaseModel
 
 app = FastAPI()
 TIMESTAMP = ""; DB_NAME = ""
-ACTIVE_QUIZ_FILE = "questions.json" # Файл за замовчуванням
+ACTIVE_QUIZ_FILE = "questions.json"
+QUIZ_CACHE = {} # Кеш для уникнення постійного читання з диска
+
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        try:
+            IP = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
+def get_qr_data():
+    ip = get_ip()
+    url = f"http://{ip}:8000"
+    qr = qrcode.make(url)
+    buffered = io.BytesIO()
+    qr.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    print(f"\n[OK] Сервер активний: {url}\n")
+    return {"qr_base64": img_str, "url": url}
+
+def load_quiz_to_memory(filename):
+    """Завантажує дані тесту в пам'ять для стабільності"""
+    global QUIZ_CACHE, ACTIVE_QUIZ_FILE
+    ACTIVE_QUIZ_FILE = filename
+    path = os.path.join("data", filename)
+    if not os.path.exists(path):
+        path = "data/questions.json"
+    
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            QUIZ_CACHE = json.load(f)
+    except Exception as e:
+        print(f"[ERROR] Помилка читання JSON: {e}")
+
+def get_db_conn():
+    """Створює підключення з налаштуваннями стабільності"""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=20)
+    # Режим WAL дозволяє одночасне читання і запис без блокувань
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
 
 def refresh_session_id(quiz_file="questions.json"):
-    global TIMESTAMP, DB_NAME, ACTIVE_QUIZ_FILE
-    ACTIVE_QUIZ_FILE = quiz_file
+    global TIMESTAMP, DB_NAME
+    load_quiz_to_memory(quiz_file)
     TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M')
     DB_NAME = f"quiz_{TIMESTAMP}.db"
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    
+    conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS users 
                       (username TEXT PRIMARY KEY, ip TEXT, current_q INTEGER DEFAULT 0, 
@@ -24,7 +71,8 @@ def refresh_session_id(quiz_file="questions.json"):
                        correct_count INTEGER, total_count INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit(); conn.close()
 
-os.makedirs('data', exist_ok=True); os.makedirs('static', exist_ok=True); refresh_session_id()
+os.makedirs('data', exist_ok=True); os.makedirs('static', exist_ok=True)
+refresh_session_id()
 
 class UserProgress(BaseModel):
     username: str
@@ -36,7 +84,10 @@ class UserProgress(BaseModel):
 class RegisterUser(BaseModel):
     username: str
 
-# Ендпоінт для отримання списку доступних тестів
+@app.get("/api/get_qr")
+def get_qr():
+    return get_qr_data()
+
 @app.get("/api/list_tests")
 def list_tests():
     files = [f for f in os.listdir('data') if f.endswith('.json')]
@@ -49,7 +100,7 @@ def restart_quiz(test_file: str = Query("questions.json")):
 
 @app.post("/api/register")
 def register_user(user: RegisterUser, request: Request):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT username FROM users WHERE username=?", (user.username,))
     if cursor.fetchone():
@@ -61,14 +112,15 @@ def register_user(user: RegisterUser, request: Request):
 
 @app.get("/api/questions")
 def get_questions():
-    # Використовуємо вибраний вчителем файл
-    path = os.path.join("data", ACTIVE_QUIZ_FILE)
-    if not os.path.exists(path): path = "data/questions.json"
-    
-    with open(path, "r", encoding="utf-8") as f: data = json.load(f)
-    qs = data["questions"]; random.shuffle(qs)
+    # Використовуємо кеш замість читання з диска
+    data = QUIZ_CACHE.copy()
+    qs = data.get("questions", []).copy()
+    random.shuffle(qs)
     for q in qs:
-        cv = q["options"][q["correct_index"]]; random.shuffle(q["options"])
+        # Робимо копію опцій, щоб не псувати основний кеш
+        q["options"] = q["options"].copy()
+        cv = q["options"][q["correct_index"]]
+        random.shuffle(q["options"])
         q["correct_index"] = q["options"].index(cv)
     return {
         "quiz_id": TIMESTAMP, 
@@ -81,20 +133,22 @@ def get_questions():
 
 @app.post("/api/update_progress")
 def update_p(data: UserProgress):
-    path = os.path.join("data", ACTIVE_QUIZ_FILE)
-    with open(path, "r", encoding="utf-8") as f: config = json.load(f)
-    max_s = config.get("max_score", 100)
+    max_s = QUIZ_CACHE.get("max_score", 100)
     raw = (data.correct_count / data.total_q) * max_s if data.total_q > 0 else 0
     penalty = data.v_count * (max_s * 0.1)
     score = max(0, round(raw - penalty, 1))
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    
+    conn = get_db_conn()
+    cursor = conn.cursor()
     cursor.execute("UPDATE users SET current_q=?, correct_count=?, score=?, v_count=? WHERE username=?", 
                    (data.current_q, data.correct_count, score, data.v_count, data.username))
-    conn.commit(); conn.close(); return {"status": "ok"}
+    conn.commit(); conn.close()
+    return {"status": "ok"}
 
 @app.get("/api/active_users")
 def get_users():
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    conn = get_db_conn()
+    cursor = conn.cursor()
     cursor.execute("""SELECT u.username, u.ip, u.current_q, r.username IS NOT NULL, 
                       COALESCE(r.score, u.score), u.v_count, COALESCE(r.correct_count, u.correct_count) 
                       FROM users u LEFT JOIN results r ON u.username = r.username 
@@ -104,15 +158,15 @@ def get_users():
 
 @app.post("/api/save_result")
 def save_r(res: dict, request: Request):
-    path = os.path.join("data", ACTIVE_QUIZ_FILE)
-    with open(path, "r", encoding="utf-8") as f: config = json.load(f)
-    max_s = config.get("max_score", 100)
-    min_pass = config.get("min_pass_score", 50)
+    max_s = QUIZ_CACHE.get("max_score", 100)
+    min_pass = QUIZ_CACHE.get("min_pass_score", 50)
     raw_score = (res['score'] / res['total']) * max_s if res['total'] > 0 else 0
     penalty = len(res['violations']) * (max_s * 0.1)
     final_grade = max(0, round(raw_score - penalty, 1))
     passed = final_grade >= min_pass
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    
+    conn = get_db_conn()
+    cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO results VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)", 
                    (res['username'], final_grade, ";".join(res['violations']), json.dumps(res['details']), request.client.host, res['score'], res['total']))
     conn.commit(); conn.close()
