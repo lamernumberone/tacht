@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Тестування</title>
+    <style>
+        :root { --blue: #007aff; --red: #ff3b30; --green: #34c759; --bg: #f4f7f6; }
+        * { box-sizing: border-box; }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            background: var(--bg); margin: 0; display: flex; justify-content: center; 
+            align-items: flex-start; min-height: 100vh; padding-top: 15vh; 
+            user-select: none; overflow-x: hidden;
+        }
+
+        #app { 
+            background: white; width: 90%; max-width: 450px; padding: 25px; 
+            border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); 
+            text-align: center; position: relative; z-index: 1;
+        }
+
+        #auth-screen, #quiz-screen, #final-screen { display: none; }
+
+        .btn { 
+            width: 100%; padding: 16px; margin: 10px 0; border-radius: 12px; 
+            border: 1px solid #eee; font-size: 17px; cursor: pointer; transition: background 0.2s;
+        }
+
+        .primary { background: var(--blue); color: white; border: none; font-weight: 600; }
+        .option { background: #f8f9fa; text-align: left; border: 1px solid #efeff4; }
+
+        .timer-display { font-weight: 700; font-size: 28px; color: var(--red); margin-bottom: 10px; }
+        #lock-timer { font-size: 48px; margin-bottom: 20px; }
+
+        #progress { font-size: 13px; color: #8e8e93; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px; }
+        
+        #fs-lock { 
+            display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; 
+            background: white; z-index: 9999; flex-direction: column; 
+            justify-content: center; align-items: center; text-align: center; 
+            padding: 20px; margin: 0;
+        }
+
+        .penalty-text { color: var(--red); font-weight: 800; font-size: 22px; margin: 15px 0; }
+        .stat-box { text-align: left; background: #f8f9fa; padding: 15px; border-radius: 15px; margin-top: 20px; }
+        .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; font-size: 15px; }
+    </style>
+</head>
+<body>
+
+<div id="fs-lock">
+    <div id="lock-timer" class="timer-display">00:00</div>
+    <h2 style="color:var(--red); font-size: 36px; margin: 0 0 10px 0; width: 100%;">ПОРУШЕННЯ</h2>
+    <p style="color: #333; font-size: 18px; margin: 5px 0; width: 100%;">Зафіксовано вихід з тесту</p>
+    <div id="penalty-display" class="penalty-text" style="width: 100%;">Штраф</div>
+    <button class="btn primary" style="max-width: 280px; margin-top: 30px;" onclick="resumeFS()">ПОВЕРНУТИСЯ В ТЕСТ</button>
+</div>
+
+<div id="app">
+    <div id="loading">Завантаження...</div>
+    <div id="auth-screen">
+        <h2 id="quiz-title">Вхід у тест</h2>
+        <input type="text" id="username" class="btn" style="text-align:center" placeholder="Прізвище та Ім'я" autocomplete="off">
+        <button class="btn primary" onclick="handleAuth()">Почати</button>
+    </div>
+    <div id="quiz-screen">
+        <div id="timer" class="timer-display">00:00</div>
+        <div id="progress">Питання 0 / 0</div>
+        <h3 id="question-txt" style="margin-bottom: 20px; font-size: 20px;"></h3>
+        <div id="options-box"></div>
+    </div>
+    <div id="final-screen"><div id="final-content"></div></div>
+</div>
+
+<script>
+    let student = "", quizData = [], currentQ = 0, points = 0, alerts = [], userAnswers = [], endTime = 0, quizId = "";
+    let isUnloading = false, isRecovering = false, violationLock = false;
+    let penaltyPerViolation = 0; // Штраф за одне порушення
+
+    function enterFS() {
+        const e = document.documentElement;
+        if (e.requestFullscreen) e.requestFullscreen();
+        else if (e.webkitRequestFullscreen) e.webkitRequestFullscreen();
+        else if (e.msRequestFullscreen) e.msRequestFullscreen();
+    }
+
+    function resumeFS() {
+        isRecovering = true;
+        violationLock = false;
+        enterFS();
+        document.getElementById('fs-lock').style.display = 'none';
+        setTimeout(() => { isRecovering = false; }, 1500);
+    }
+
+    window.onload = async () => {
+        try {
+            const qRes = await fetch('/api/questions');
+            const qData = await qRes.json();
+            quizId = qData.quiz_id;
+            // Розрахунок штрафу: 10% від максимального балу
+            penaltyPerViolation = (qData.max_score * 0.1).toFixed(1);
+            
+            document.getElementById('quiz-title').innerText = qData.quiz_title;
+            document.getElementById('loading').style.display = 'none';
+            const final = localStorage.getItem('final_res_' + quizId);
+            if (final) return renderFinalScreen(JSON.parse(final));
+            const saved = localStorage.getItem('session_' + quizId);
+            if (saved) {
+                const s = JSON.parse(saved);
+                student = s.student; currentQ = s.currentQ; points = s.points;
+                userAnswers = s.userAnswers; alerts = s.alerts; endTime = s.endTime; quizData = s.quizData;
+                document.getElementById('quiz-screen').style.display = 'block';
+                startTimer(); renderQuestion();
+            } else {
+                document.getElementById('auth-screen').style.display = 'block';
+            }
+        } catch (e) { document.getElementById('loading').innerText = "Помилка зв'язку"; }
+    };
+
+    function logViolation(type) {
+        if (!student || isUnloading || isRecovering || violationLock) return;
+        violationLock = true;
+        alerts.push(`${type}: ${new Date().toLocaleTimeString()}`);
+        
+        // Відображення штрафу на екрані блокування
+        document.getElementById('penalty-display').innerText = `Штраф: -${penaltyPerViolation} балів`;
+        
+        saveSession();
+        updateLiveProgress();
+        document.getElementById('fs-lock').style.display = 'flex';
+    }
+
+    window.addEventListener('beforeunload', () => { isUnloading = true; });
+    window.addEventListener('blur', () => logViolation("Фокус"));
+    document.addEventListener('fullscreenchange', () => {
+        if (!document.fullscreenElement) logViolation("FS");
+    });
+
+    function saveSession() {
+        if (!student) return;
+        localStorage.setItem('session_' + quizId, JSON.stringify({ student, currentQ, points, userAnswers, alerts, endTime, quizData }));
+    }
+
+    async function updateLiveProgress() {
+        if (!student || isUnloading) return;
+        fetch('/api/update_progress', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ 
+                username: student, current_q: currentQ, correct_count: points, 
+                total_q: quizData.length, v_count: alerts.length 
+            })
+        });
+    }
+
+    async function handleAuth() {
+        student = document.getElementById('username').value.trim();
+        if (!student) return alert("Введіть ваше ім'я");
+        
+        const regRes = await fetch('/api/register', { 
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({username: student}) 
+        });
+        
+        if ((await regRes.json()).status === "forbidden") return alert("Це ім'я вже зареєстроване");
+        
+        enterFS();
+        const qData = await (await fetch('/api/questions')).json();
+        quizData = qData.questions;
+        endTime = Date.now() + (qData.time_limit_seconds * 1000);
+        document.getElementById('auth-screen').style.display = 'none';
+        document.getElementById('quiz-screen').style.display = 'block';
+        saveSession(); startTimer(); renderQuestion();
+    }
+
+    function startTimer() {
+        const tInt = setInterval(() => {
+            if (isUnloading) { clearInterval(tInt); return; }
+            const diff = Math.max(0, Math.floor((endTime - Date.now()) / 1000));
+            const timeStr = `${Math.floor(diff/60)}:${(diff%60).toString().padStart(2,'0')}`;
+            document.getElementById('timer').innerText = timeStr;
+            document.getElementById('lock-timer').innerText = timeStr;
+            if (diff <= 0) { clearInterval(tInt); sendResults(); }
+        }, 1000);
+    }
+
+    function renderQuestion() {
+        if (currentQ >= quizData.length) return sendResults();
+        updateLiveProgress();
+        const q = quizData[currentQ];
+        document.getElementById('progress').innerText = `Питання ${currentQ + 1} / ${quizData.length}`;
+        document.getElementById('question-txt').innerText = q.question;
+        const box = document.getElementById('options-box'); box.innerHTML = '';
+        q.options.forEach((opt, i) => {
+            const b = document.createElement('button');
+            b.className = 'btn option'; b.innerText = opt;
+            b.onclick = () => {
+                if (i === q.correct_index) points++;
+                userAnswers.push({is_right: i === q.correct_index});
+                currentQ++; saveSession(); renderQuestion();
+            };
+            box.appendChild(b);
+        });
+    }
+
+    async function sendResults() {
+        isUnloading = true; 
+        const res = await fetch('/api/save_result', { 
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({username: student, score: points, total: quizData.length, violations: alerts, details: userAnswers}) 
+        });
+        const f = await res.json();
+        const resObj = { 
+            student, 
+            grade: f.final_grade, 
+            correct: points, 
+            total: quizData.length, 
+            violations: alerts.length,
+            is_passed: f.is_passed,
+            total_penalty: (alerts.length * penaltyPerViolation).toFixed(1) // Загальний штраф
+        };
+        localStorage.setItem('final_res_' + quizId, JSON.stringify(resObj));
+        localStorage.removeItem('session_' + quizId);
+        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+        renderFinalScreen(resObj);
+    }
+
+    function renderFinalScreen(d) {
+        document.getElementById('fs-lock').style.display = 'none';
+        const statusText = d.is_passed ? "✅ ТЕСТ СКЛАДЕНО" : "❌ ТЕСТ НЕ СКЛАДЕНО";
+        const statusColor = d.is_passed ? "var(--green)" : "var(--red)";
+
+        document.getElementById('app').innerHTML = `
+            <h2 style="margin-top:0;">${d.student}</h2>
+            <div style="font-size:72px; color:var(--blue); font-weight:800; margin: 20px 0;">${d.grade}</div>
+            <div class="stat-box">
+                <div class="stat-row"><span>Вірно:</span><b>${d.correct} / ${d.total}</b></div>
+                <div class="stat-row"><span>Порушень:</span><b style="color:var(--red)">${d.violations}</b></div>
+                <div class="stat-row"><span>Штрафні бали:</span><b style="color:var(--red)">-${d.total_penalty}</b></div>
+            </div>
+            <h3 style="color:${statusColor}; margin-top:30px;">${statusText}</h3>`;
+    }
+</script>
+</body>
+</html>

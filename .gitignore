@@ -1,0 +1,16 @@
+# Python (кеш та віртуальні середовища)
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+data/
+
+# Системні файли та налаштування IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Конфіденційні дані
+.env
