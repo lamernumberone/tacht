@@ -7,8 +7,8 @@ from pydantic import BaseModel
 
 app = FastAPI()
 TIMESTAMP = ""; DB_NAME = ""
-ACTIVE_QUIZ_FILE = "questions.json"
-QUIZ_CACHE = {} # Кеш для уникнення постійного читання з диска
+ACTIVE_QUIZ_FILE = None 
+QUIZ_CACHE = {} 
 
 def get_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -35,31 +35,43 @@ def get_qr_data():
     return {"qr_base64": img_str, "url": url}
 
 def load_quiz_to_memory(filename):
-    """Завантажує дані тесту в пам'ять для стабільності"""
+    """Завантажує дані тесту в пам'ять"""
     global QUIZ_CACHE, ACTIVE_QUIZ_FILE
+    if not filename: return
+    
     ACTIVE_QUIZ_FILE = filename
     path = os.path.join("data", filename)
-    if not os.path.exists(path):
-        path = "data/questions.json"
     
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            QUIZ_CACHE = json.load(f)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                QUIZ_CACHE = json.load(f)
     except Exception as e:
         print(f"[ERROR] Помилка читання JSON: {e}")
 
 def get_db_conn():
-    """Створює підключення з налаштуваннями стабільності"""
+    """Підключення до SQLite у режимі WAL"""
     conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=20)
-    # Режим WAL дозволяє одночасне читання і запис без блокувань
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
-def refresh_session_id(quiz_file="questions.json"):
+def refresh_session_id(quiz_file=None):
     global TIMESTAMP, DB_NAME
+    
+    if not quiz_file:
+        files = sorted([f for f in os.listdir('data') if f.endswith('.json')])
+        if files:
+            quiz_file = files[0]
+        else:
+            print("[WARNING] Файли .json не знайдені")
+            return
+
     load_quiz_to_memory(quiz_file)
-    TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M')
-    DB_NAME = f"quiz_{TIMESTAMP}.db"
+    
+    # Формування назви БД: назва файлу + ДД.ММ.РРРР_ГГХХ
+    file_base = os.path.splitext(quiz_file)[0]
+    TIMESTAMP = datetime.now().strftime('%d.%m.%Y_%H%M')
+    DB_NAME = f"{file_base}_{TIMESTAMP}.db"
     
     conn = get_db_conn()
     cursor = conn.cursor()
@@ -90,13 +102,31 @@ def get_qr():
 
 @app.get("/api/list_tests")
 def list_tests():
-    files = [f for f in os.listdir('data') if f.endswith('.json')]
+    files = sorted([f for f in os.listdir('data') if f.endswith('.json')])
     return {"tests": files, "current": ACTIVE_QUIZ_FILE}
 
+@app.get("/api/test_info")
+def get_test_info(filename: str):
+    """Метадані тесту для адмінки"""
+    path = os.path.join("data", filename)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {
+                    "title": data.get("quiz_title", "Без назви"),
+                    "count": len(data.get("questions", [])),
+                    "time": data.get("time_limit_minutes", 0),
+                    "max_score": data.get("max_score", 100),
+                    "min_pass": data.get("min_pass_score", 50)
+                }
+    except Exception: return {"error": "Error"}
+    return {"error": "Not found"}
+
 @app.post("/api/restart")
-def restart_quiz(test_file: str = Query("questions.json")): 
+def restart_quiz(test_file: str = Query(None)): 
     refresh_session_id(test_file)
-    return {"status": "ok", "active_test": test_file}
+    return {"status": "ok"}
 
 @app.post("/api/register")
 def register_user(user: RegisterUser, request: Request):
@@ -112,12 +142,11 @@ def register_user(user: RegisterUser, request: Request):
 
 @app.get("/api/questions")
 def get_questions():
-    # Використовуємо кеш замість читання з диска
+    if not QUIZ_CACHE: return {"error": "No quiz loaded"}
     data = QUIZ_CACHE.copy()
     qs = data.get("questions", []).copy()
     random.shuffle(qs)
     for q in qs:
-        # Робимо копію опцій, щоб не псувати основний кеш
         q["options"] = q["options"].copy()
         cv = q["options"][q["correct_index"]]
         random.shuffle(q["options"])
@@ -163,14 +192,13 @@ def save_r(res: dict, request: Request):
     raw_score = (res['score'] / res['total']) * max_s if res['total'] > 0 else 0
     penalty = len(res['violations']) * (max_s * 0.1)
     final_grade = max(0, round(raw_score - penalty, 1))
-    passed = final_grade >= min_pass
     
     conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO results VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)", 
                    (res['username'], final_grade, ";".join(res['violations']), json.dumps(res['details']), request.client.host, res['score'], res['total']))
     conn.commit(); conn.close()
-    return {"final_grade": final_grade, "is_passed": passed, "min_pass_score": min_pass, "max_score": max_s}
+    return {"final_grade": final_grade, "is_passed": final_grade >= min_pass}
 
 @app.get("/")
 def s_p(): return FileResponse('static/index.html')

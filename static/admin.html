@@ -15,37 +15,79 @@
         .btn-green { background: var(--green); }
         .btn-red { background: var(--red); }
         .hidden { display: none; }
-        select { background: #48484a; color: white; border: 1px solid #555; padding: 10px; border-radius: 8px; outline: none; }
+        select { background: #48484a; color: white; border: 1px solid #555; padding: 10px; border-radius: 8px; outline: none; min-width: 200px; }
         
-        #url-text { 
-            color: #007aff; 
-            font-size: 28px; 
-            margin: 10px 0; 
-            font-family: monospace; 
-            background: rgba(0, 122, 255, 0.1);
-            padding: 10px;
-            border-radius: 10px;
-            display: inline-block;
+        #test-info-box { 
+            background: rgba(255,255,255,0.05); 
+            padding: 25px; 
+            border-radius: 15px; 
+            margin: 20px auto; 
+            max-width: 700px; 
+            text-align: left; 
+            border: 1px solid #444;
         }
+        
+        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px; font-size: 28px; }
+        .info-label { color: var(--text-muted); }
+        .info-val { font-weight: bold; color: var(--blue); }
+
+        #info-title { margin: 0 0 15px 0; color: var(--blue); font-size: 32px; }
+
+        #qr-display { 
+            display: none; 
+            border: 2px solid #444; 
+            padding: 40px; 
+            border-radius: 20px; 
+            margin-bottom: 20px;
+            flex-direction: row;
+            justify-content: center;
+            align-items: center;
+            gap: 60px;
+            flex-wrap: wrap;
+        }
+
+        #url-text { color: #007aff; font-size: 32px; margin: 10px 0; font-family: monospace; background: rgba(0, 122, 255, 0.1); padding: 15px; border-radius: 10px; display: inline-block; font-weight: bold; }
+        #active-test-display { color: var(--blue); font-size: 24px; margin: -10px 0 20px 0; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Моніторинг тесту</h1>
+        <div id="active-test-display" style="display:none;"></div>
         
         <div id="setup-area">
             <div style="margin-bottom: 20px;">
                 <label>Виберіть файл тесту: </label>
-                <select id="test-file-select"></select>
+                <select id="test-file-select" onchange="updatePreview()"></select>
             </div>
+
+            <div id="test-info-box" style="display:none;">
+                <h3 id="info-title"></h3>
+                <div class="info-grid">
+                    <div><span class="info-label">Питань:</span> <span id="info-count" class="info-val"></span></div>
+                    <div><span class="info-label">Час:</span> <span id="info-time" class="info-val"></span> хв.</div>
+                    <div><span class="info-label">Макс. бал:</span> <span id="info-max" class="info-val"></span></div>
+                    <div><span class="info-label">Прохідний:</span> <span id="info-pass" class="info-val"></span></div>
+                    
+                    <div style="grid-column: span 2; text-align: center; margin-top: 15px; border-top: 1px solid #444; padding-top: 15px;">
+                        <span class="info-label">Штраф за вихід:</span> 
+                        <span id="info-penalty" class="info-val" style="color:var(--red)"></span>
+                    </div>
+                </div>
+            </div>
+
             <button class="btn btn-green" onclick="startTest()">ПОЧАТИ ТЕСТ ТА ПОКАЗАТИ QR</button>
         </div>
 
-        <div id="qr-display" style="display:none; border: 2px solid #444; padding: 20px; border-radius: 20px; margin-bottom: 20px;">
-            <img id="qr-img" src="" style="width:320px; border:16px solid white; border-radius:10px; margin:15px;">
-            <div style="margin-top: 10px;">
-                <p style="color: #8e8e93; margin-bottom: 5px;">Адреса для підключення:</p>
+        <div id="qr-display">
+            <img id="qr-img" src="" style="width:280px; border:16px solid white; border-radius:10px;">
+            
+            <div style="text-align: left;">
+                <p style="color: #8e8e93; margin-bottom: 10px; font-size: 20px;">Адреса для підключення учнів:</p>
                 <div id="url-text">Завантаження...</div>
+                <div style="margin-top: 25px;">
+                    <button class="btn btn-red" onclick="resetTest()" style="width: 100%;">НОВИЙ ТЕСТ (ОЧИСТИТИ ВСЕ)</button>
+                </div>
             </div>
         </div>
 
@@ -54,7 +96,6 @@
                 <label><input type="checkbox" id="show-correct" onchange="refresh()"> Вірно</label>
                 <label><input type="checkbox" id="show-violations" onchange="refresh()"> Порушення</label>
                 <label><input type="checkbox" id="show-scores" onchange="refresh()"> Фінальний бал</label>
-                <button class="btn btn-red" onclick="resetTest()">НОВИЙ ТЕСТ (ОЧИСТИТИ ВСЕ)</button>
             </div>
             <table class="admin-table">
                 <thead>
@@ -65,43 +106,56 @@
         </div>
     </div>
     <script>
-        let totalQ = 0;
-        let minPassScore = 0;
+        let totalQ = 0, minPassScore = 0, isTestActive = false;
+
+        window.addEventListener('beforeunload', (e) => {
+            if (isTestActive) { e.preventDefault(); e.returnValue = ''; }
+        });
 
         window.onload = async () => {
             const res = await fetch('/api/list_tests');
             const data = await res.json();
             const select = document.getElementById('test-file-select');
             select.innerHTML = data.tests.map(f => `<option value="${f}" ${f === data.current ? 'selected' : ''}>${f}</option>`).join('');
+            updatePreview();
         };
+
+        async function updatePreview() {
+            const file = document.getElementById('test-file-select').value;
+            if (!file) return;
+            const res = await fetch(`/api/test_info?filename=${file}`);
+            const data = await res.json();
+            document.getElementById('info-title').innerText = data.title;
+            document.getElementById('info-count').innerText = data.count;
+            document.getElementById('info-time').innerText = data.time;
+            document.getElementById('info-max').innerText = data.max_score;
+            document.getElementById('info-pass').innerText = data.min_pass;
+            document.getElementById('info-penalty').innerText = `-${(data.max_score * 0.1).toFixed(1)} балів`;
+            document.getElementById('test-info-box').style.display = 'block';
+        }
 
         async function startTest() {
             const selectedFile = document.getElementById('test-file-select').value;
             await fetch(`/api/restart?test_file=${selectedFile}`, { method: 'POST' });
-            
             const qrRes = await fetch('/api/get_qr');
             const qrData = await qrRes.json();
-            
             const qData = await (await fetch('/api/questions')).json();
             totalQ = qData.questions.length;
             minPassScore = qData.min_pass_score;
-            
             document.getElementById('setup-area').style.display = 'none';
-            
+            document.getElementById('active-test-display').innerText = qData.quiz_title;
+            document.getElementById('active-test-display').style.display = 'block';
             document.getElementById('qr-img').src = 'data:image/png;base64,' + qrData.qr_base64;
             document.getElementById('url-text').innerText = qrData.url;
-            
-            document.getElementById('qr-display').style.display = 'block';
+            document.getElementById('qr-display').style.display = 'flex'; 
             document.getElementById('monitor').style.display = 'block';
-            
-            // Збільшено інтервал до 5000мс для зменшення навантаження
-            setInterval(refresh, 5000); 
-            refresh();
+            isTestActive = true;
+            setInterval(refresh, 5000); refresh();
         }
 
         async function resetTest() {
-            if (!confirm("УВАГА! Це створить нову порожню базу даних. Продовжити?")) return;
-            window.location.reload();
+            if (!confirm("УВАГА! Це створить нову базу даних. Продовжити?")) return;
+            isTestActive = false; window.location.reload();
         }
 
         async function refresh() {
@@ -110,29 +164,20 @@
                 const c = document.getElementById('show-correct').checked;
                 const v = document.getElementById('show-violations').checked;
                 const s = document.getElementById('show-scores').checked;
-                
                 document.querySelectorAll('.col-correct').forEach(e => e.classList.toggle('hidden', !c));
                 document.querySelectorAll('.col-violations').forEach(e => e.classList.toggle('hidden', !v));
                 document.querySelectorAll('.col-score').forEach(e => e.classList.toggle('hidden', !s));
-                
                 document.getElementById('user-list').innerHTML = res.users.map((u, i) => {
-                    let statusText = 'АКТИВНИЙ';
-                    let statusColor = 'var(--green)';
-                    if (u.finished) {
-                        const passed = u.score >= minPassScore;
-                        statusText = passed ? 'СКЛАДЕНО' : 'НЕ СКЛАДЕНО';
-                        statusColor = passed ? 'var(--green)' : 'var(--red)';
-                    }
-                    return `
-                    <tr>
-                        <td style="color:var(--text-muted)">${i + 1}</td>
+                    let passed = u.score >= minPassScore;
+                    return `<tr>
+                        <td>${i + 1}</td>
                         <td style="font-weight:600;">${u.name}</td>
-                        <td style="color:var(--blue)">${u.finished ? totalQ : u.progress} / ${totalQ}</td>
-                        <td class="col-correct ${c ? '' : 'hidden'}" style="color:var(--blue)">${u.correct} / ${totalQ}</td>
-                        <td class="col-violations ${v ? '' : 'hidden'}" style="color:orange;">${u.v_count}</td>
-                        <td style="color:var(--text-muted)">${u.ip}</td>
-                        <td style="color:${statusColor}; font-weight:bold; font-size:11px;">${statusText}</td>
-                        <td class="col-score ${s ? '' : 'hidden'}" style="color:var(--blue); font-weight:bold;">${u.score}</td>
+                        <td>${u.finished ? totalQ : u.progress} / ${totalQ}</td>
+                        <td class="col-correct ${c ? '' : 'hidden'}">${u.correct}</td>
+                        <td class="col-violations ${v ? '' : 'hidden'}">${u.v_count}</td>
+                        <td>${u.ip}</td>
+                        <td style="color:${u.finished ? (passed ? 'var(--green)' : 'var(--red)') : 'var(--blue)'}; font-weight:bold;">${u.finished ? (passed ? 'СКЛАДЕНО' : 'НЕ СКЛАДЕНО') : 'АКТИВНИЙ'}</td>
+                        <td class="col-score ${s ? '' : 'hidden'}">${u.score}</td>
                     </tr>`;
                 }).join('');
             } catch(e) {}
